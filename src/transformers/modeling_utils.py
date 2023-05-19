@@ -420,7 +420,7 @@ def load_sharded_checkpoint(model, folder, strict=True, prefer_safe=True):
     return torch.nn.modules.module._IncompatibleKeys(missing_keys, unexpected_keys)
 
 
-def load_state_dict(checkpoint_file: Union[str, os.PathLike]):
+def load_state_dict(checkpoint_file: Union[str, os.PathLike], decryption_key: Optional[str] = None):
     """
     Reads a PyTorch checkpoint file, returning properly formatted errors if they arise.
     """
@@ -439,7 +439,7 @@ def load_state_dict(checkpoint_file: Union[str, os.PathLike]):
             )
         return safe_load_file(checkpoint_file)
     try:
-        return torch.load(checkpoint_file, map_location="cpu")
+        return torch.load(checkpoint_file, map_location="cpu", decryption_key=decryption_key)
     except Exception as e:
         try:
             with open(checkpoint_file) as f:
@@ -1664,6 +1664,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         max_shard_size: Union[int, str] = "10GB",
         safe_serialization: bool = False,
         variant: Optional[str] = None,
+        encryption_key: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1838,9 +1839,11 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if safe_serialization:
                 # At some point we will need to deal better with save_function (used for TPU and other distributed
                 # joyfulness), but for now this enough.
+                if encryption_key is not None:
+                    logger.info(f"When using safe_tensor, the encryption_key option will not take effects")
                 safe_save_file(shard, os.path.join(save_directory, shard_file), metadata={"format": "pt"})
             else:
-                save_function(shard, os.path.join(save_directory, shard_file))
+                save_function(shard, os.path.join(save_directory, shard_file), encryption_key=encryption_key)
 
         if index is None:
             path_to_weights = os.path.join(save_directory, _add_variant(WEIGHTS_NAME, variant))
@@ -1916,7 +1919,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             return super().float(*args)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], *model_args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], decryption_key: Optional[str] = None, *model_args, **kwargs):
         r"""
         Instantiate a pretrained pytorch model from a pre-trained model configuration.
 
@@ -2557,7 +2560,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         if from_pt:
             if not is_sharded and state_dict is None:
                 # Time to load the checkpoint
-                state_dict = load_state_dict(resolved_archive_file)
+                state_dict = load_state_dict(resolved_archive_file, decryption_key=decryption_key)
 
             # set dtype to instantiate the model under:
             # 1. If torch_dtype is not None, we use that dtype
@@ -2808,6 +2811,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 dtype=torch_dtype,
                 load_in_8bit=load_in_8bit,
                 keep_in_fp32_modules=keep_in_fp32_modules,
+                decryption_key=decryption_key,
             )
 
         model.is_loaded_in_8bit = load_in_8bit
@@ -2875,6 +2879,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         dtype=None,
         load_in_8bit=False,
         keep_in_fp32_modules=None,
+        decryption_key: Optional[str] = None,
     ):
         is_safetensors = False
         if load_in_8bit:
@@ -3106,7 +3111,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
                 # Skip the load for shards that only contain disk-offloaded weights when using safetensors for the offload.
                 if shard_file in disk_only_shard_files:
                     continue
-                state_dict = load_state_dict(shard_file)
+                state_dict = load_state_dict(shard_file, decryption_key=decryption_key)
 
                 # Mistmatched keys contains tuples key/shape1/shape2 of weights in the checkpoint that have a shape not
                 # matching the weights in the model.
