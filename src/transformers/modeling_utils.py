@@ -74,7 +74,7 @@ from .utils.hub import convert_file_size_to_int, get_checkpoint_shard_files
 from .utils.import_utils import ENV_VARS_TRUE_VALUES, importlib_metadata, is_sagemaker_mp_enabled
 from .utils.quantization_config import BitsAndBytesConfig
 from .utils.versions import require_version_core
-from bigdl.nano.pytorch.patching import patch_encryption
+from encryption.encryption_patching import patch_encryption
 
 patch_encryption()
 

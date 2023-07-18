@@ -21,6 +21,7 @@ of output with special method for the Fast tokenizers)
 import copy
 import json
 import os
+import io
 import re
 import warnings
 from collections import OrderedDict, UserDict
