@@ -24,6 +24,7 @@ from ...configuration_utils import PretrainedConfig
 from ...dynamic_module_utils import get_class_from_dynamic_module
 from ...tokenization_utils import PreTrainedTokenizer
 from ...tokenization_utils_base import TOKENIZER_CONFIG_FILE
+from ...tokenization_utils_fast import PreTrainedTokenizerFast
 from ...utils import cached_file, extract_commit_hash, is_sentencepiece_available, is_tokenizers_available, logging
 from ..encoder_decoder import EncoderDecoderConfig
 from .auto_factory import _LazyAutoMapping
@@ -34,12 +35,6 @@ from .configuration_auto import (
     model_type_to_module_name,
     replace_list_option_in_docstrings,
 )
-
-
-if is_tokenizers_available():
-    from ...tokenization_utils_fast import PreTrainedTokenizerFast
-else:
-    PreTrainedTokenizerFast = None
 
 
 logger = logging.get_logger(__name__)
@@ -127,7 +122,6 @@ else:
                     "CpmTokenizerFast" if is_tokenizers_available() else None,
                 ),
             ),
-            ("cpmant", ("CpmAntTokenizer", None)),
             ("ctrl", ("CTRLTokenizer", None)),
             ("data2vec-text", ("RobertaTokenizer", "RobertaTokenizerFast" if is_tokenizers_available() else None)),
             ("deberta", ("DebertaTokenizer", "DebertaTokenizerFast" if is_tokenizers_available() else None)),
@@ -157,7 +151,6 @@ else:
             ("git", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
             ("gpt-sw3", ("GPTSw3Tokenizer" if is_sentencepiece_available() else None, None)),
             ("gpt2", ("GPT2Tokenizer", "GPT2TokenizerFast" if is_tokenizers_available() else None)),
-            ("gpt_bigcode", ("GPT2Tokenizer", "GPT2TokenizerFast" if is_tokenizers_available() else None)),
             ("gpt_neo", ("GPT2Tokenizer", "GPT2TokenizerFast" if is_tokenizers_available() else None)),
             ("gpt_neox", (None, "GPTNeoXTokenizerFast" if is_tokenizers_available() else None)),
             ("gpt_neox_japanese", ("GPTNeoXJapaneseTokenizer", None)),
@@ -174,13 +167,6 @@ else:
             ("layoutxlm", ("LayoutXLMTokenizer", "LayoutXLMTokenizerFast" if is_tokenizers_available() else None)),
             ("led", ("LEDTokenizer", "LEDTokenizerFast" if is_tokenizers_available() else None)),
             ("lilt", ("LayoutLMv3Tokenizer", "LayoutLMv3TokenizerFast" if is_tokenizers_available() else None)),
-            (
-                "llama",
-                (
-                    "LlamaTokenizer" if is_sentencepiece_available() else None,
-                    "LlamaTokenizerFast" if is_tokenizers_available() else None,
-                ),
-            ),
             ("longformer", ("LongformerTokenizer", "LongformerTokenizerFast" if is_tokenizers_available() else None)),
             (
                 "longt5",
@@ -207,7 +193,6 @@ else:
                     "MBart50TokenizerFast" if is_tokenizers_available() else None,
                 ),
             ),
-            ("mega", ("RobertaTokenizer", "RobertaTokenizerFast" if is_tokenizers_available() else None)),
             ("megatron-bert", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
             ("mgp-str", ("MgpstrTokenizer", None)),
             ("mluke", ("MLukeTokenizer" if is_sentencepiece_available() else None, None)),
@@ -224,13 +209,6 @@ else:
             ("nezha", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
             (
                 "nllb",
-                (
-                    "NllbTokenizer" if is_sentencepiece_available() else None,
-                    "NllbTokenizerFast" if is_tokenizers_available() else None,
-                ),
-            ),
-            (
-                "nllb-moe",
                 (
                     "NllbTokenizer" if is_sentencepiece_available() else None,
                     "NllbTokenizerFast" if is_tokenizers_available() else None,
@@ -269,7 +247,6 @@ else:
                 ),
             ),
             ("phobert", ("PhobertTokenizer", None)),
-            ("pix2struct", ("T5Tokenizer", "T5TokenizerFast" if is_tokenizers_available() else None)),
             ("plbart", ("PLBartTokenizer" if is_sentencepiece_available() else None, None)),
             ("prophetnet", ("ProphetNetTokenizer", None)),
             ("qdqbert", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
@@ -410,7 +387,7 @@ def tokenizer_class_from_name(class_name: str):
 
 
 def get_tokenizer_config(
-    pretrained_model_name_or_path: Union[str, os.PathLike],
+    pretrained_model_name_or_path: Union[str, os.PathLike, dict],
     cache_dir: Optional[Union[str, os.PathLike]] = None,
     force_download: bool = False,
     resume_download: bool = False,
@@ -483,28 +460,34 @@ def get_tokenizer_config(
     tokenizer_config = get_tokenizer_config("tokenizer-test")
     ```"""
     commit_hash = kwargs.get("_commit_hash", None)
-    resolved_config_file = cached_file(
-        pretrained_model_name_or_path,
-        TOKENIZER_CONFIG_FILE,
-        cache_dir=cache_dir,
-        force_download=force_download,
-        resume_download=resume_download,
-        proxies=proxies,
-        use_auth_token=use_auth_token,
-        revision=revision,
-        local_files_only=local_files_only,
-        subfolder=subfolder,
-        _raise_exceptions_for_missing_entries=False,
-        _raise_exceptions_for_connection_errors=False,
-        _commit_hash=commit_hash,
-    )
-    if resolved_config_file is None:
-        logger.info("Could not locate the tokenizer configuration file, will try to use the model config instead.")
-        return {}
+    if isinstance(pretrained_model_name_or_path, dict):
+        result = json.loads(pretrained_model_name_or_path[TOKENIZER_CONFIG_FILE].read().decode())
+        pretrained_model_name_or_path[TOKENIZER_CONFIG_FILE].seek(0)
+        resolved_config_file = None
+    else:
+        resolved_config_file = cached_file(
+            pretrained_model_name_or_path,
+            TOKENIZER_CONFIG_FILE,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            resume_download=resume_download,
+            proxies=proxies,
+            use_auth_token=use_auth_token,
+            revision=revision,
+            local_files_only=local_files_only,
+            subfolder=subfolder,
+            _raise_exceptions_for_missing_entries=False,
+            _raise_exceptions_for_connection_errors=False,
+            _commit_hash=commit_hash,
+        )  
+        if resolved_config_file is None:
+            logger.info("Could not locate the tokenizer configuration file, will try to use the model config instead.")
+            return {}
+        with open(resolved_config_file, encoding="utf-8") as reader:
+            result = json.load(reader)
+
     commit_hash = extract_commit_hash(resolved_config_file, commit_hash)
 
-    with open(resolved_config_file, encoding="utf-8") as reader:
-        result = json.load(reader)
     result["_commit_hash"] = commit_hash
     return result
 
@@ -597,7 +580,7 @@ class AutoTokenizer:
         >>> tokenizer = AutoTokenizer.from_pretrained("dbmdz/bert-base-german-cased")
 
         >>> # If vocabulary files are in a directory (e.g. tokenizer was saved using *save_pretrained('./test/saved_model/')*)
-        >>> # tokenizer = AutoTokenizer.from_pretrained("./test/bert_saved_model/")
+        >>> tokenizer = AutoTokenizer.from_pretrained("./test/bert_saved_model/")
 
         >>> # Download vocabulary from huggingface.co and define model-specific arguments
         >>> tokenizer = AutoTokenizer.from_pretrained("roberta-base", add_prefix_space=True)

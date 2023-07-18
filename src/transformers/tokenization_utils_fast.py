@@ -19,6 +19,7 @@
 import copy
 import json
 import os
+import io
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -108,7 +109,10 @@ class PreTrainedTokenizerFast(PreTrainedTokenizerBase):
             fast_tokenizer = copy.deepcopy(tokenizer_object)
         elif fast_tokenizer_file is not None and not from_slow:
             # We have a serialization from tokenizers which let us directly build the backend
-            fast_tokenizer = TokenizerFast.from_file(fast_tokenizer_file)
+            if isinstance(fast_tokenizer_file, io.BytesIO):
+                fast_tokenizer = TokenizerFast.from_str(fast_tokenizer_file.getvalue().decode())
+            else:
+                fast_tokenizer = TokenizerFast.from_file(fast_tokenizer_file)
         elif slow_tokenizer is not None:
             # We need to convert a slow tokenizer to build the backend
             fast_tokenizer = convert_slow_tokenizer(slow_tokenizer)
@@ -539,7 +543,7 @@ class PreTrainedTokenizerFast(PreTrainedTokenizerBase):
         self,
         token_ids: Union[int, List[int]],
         skip_special_tokens: bool = False,
-        clean_up_tokenization_spaces: bool = None,
+        clean_up_tokenization_spaces: bool = True,
         **kwargs,
     ) -> str:
         self._decode_use_source_tokenizer = kwargs.pop("use_source_tokenizer", False)
@@ -548,11 +552,6 @@ class PreTrainedTokenizerFast(PreTrainedTokenizerBase):
             token_ids = [token_ids]
         text = self._tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
-        clean_up_tokenization_spaces = (
-            clean_up_tokenization_spaces
-            if clean_up_tokenization_spaces is not None
-            else self.clean_up_tokenization_spaces
-        )
         if clean_up_tokenization_spaces:
             clean_text = self.clean_up_tokenization(text)
             return clean_text
