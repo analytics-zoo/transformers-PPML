@@ -410,7 +410,7 @@ def tokenizer_class_from_name(class_name: str):
 
 
 def get_tokenizer_config(
-    pretrained_model_name_or_path: Union[str, os.PathLike],
+    pretrained_model_name_or_path: Union[str, os.PathLike, dict],
     cache_dir: Optional[Union[str, os.PathLike]] = None,
     force_download: bool = False,
     resume_download: bool = False,
@@ -483,28 +483,34 @@ def get_tokenizer_config(
     tokenizer_config = get_tokenizer_config("tokenizer-test")
     ```"""
     commit_hash = kwargs.get("_commit_hash", None)
-    resolved_config_file = cached_file(
-        pretrained_model_name_or_path,
-        TOKENIZER_CONFIG_FILE,
-        cache_dir=cache_dir,
-        force_download=force_download,
-        resume_download=resume_download,
-        proxies=proxies,
-        use_auth_token=use_auth_token,
-        revision=revision,
-        local_files_only=local_files_only,
-        subfolder=subfolder,
-        _raise_exceptions_for_missing_entries=False,
-        _raise_exceptions_for_connection_errors=False,
-        _commit_hash=commit_hash,
-    )
-    if resolved_config_file is None:
-        logger.info("Could not locate the tokenizer configuration file, will try to use the model config instead.")
-        return {}
+    if isinstance(pretrained_model_name_or_path, dict):
+        result = json.loads(pretrained_model_name_or_path[TOKENIZER_CONFIG_FILE].read().decode())
+        pretrained_model_name_or_path[TOKENIZER_CONFIG_FILE].seek(0)
+        resolved_config_file = None
+    else:
+        resolved_config_file = cached_file(
+            pretrained_model_name_or_path,
+            TOKENIZER_CONFIG_FILE,
+            cache_dir=cache_dir,
+            force_download=force_download,
+            resume_download=resume_download,
+            proxies=proxies,
+            use_auth_token=use_auth_token,
+            revision=revision,
+            local_files_only=local_files_only,
+            subfolder=subfolder,
+            _raise_exceptions_for_missing_entries=False,
+            _raise_exceptions_for_connection_errors=False,
+            _commit_hash=commit_hash,
+        )  
+        if resolved_config_file is None:
+            logger.info("Could not locate the tokenizer configuration file, will try to use the model config instead.")
+            return {}
+        with open(resolved_config_file, encoding="utf-8") as reader:
+            result = json.load(reader)
+
     commit_hash = extract_commit_hash(resolved_config_file, commit_hash)
 
-    with open(resolved_config_file, encoding="utf-8") as reader:
-        result = json.load(reader)
     result["_commit_hash"] = commit_hash
     return result
 

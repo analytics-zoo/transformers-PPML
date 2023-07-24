@@ -17,6 +17,7 @@
 
 import collections
 import os
+import io
 import unicodedata
 from typing import List, Optional, Tuple
 
@@ -114,11 +115,9 @@ PRETRAINED_INIT_CONFIGURATION = {
 }
 
 
-def load_vocab(vocab_file):
+def load_vocab(tokens):
     """Loads a vocabulary file into a dictionary."""
     vocab = collections.OrderedDict()
-    with open(vocab_file, "r", encoding="utf-8") as reader:
-        tokens = reader.readlines()
     for index, token in enumerate(tokens):
         token = token.rstrip("\n")
         vocab[token] = index
@@ -210,12 +209,17 @@ class BertTokenizer(PreTrainedTokenizer):
             **kwargs,
         )
 
-        if not os.path.isfile(vocab_file):
+        if isinstance(vocab_file, io.BytesIO):
+            tokens = vocab_file.read().decode("utf-8").split("\n")
+        elif not os.path.isfile(vocab_file):
             raise ValueError(
                 f"Can't find a vocabulary file at path '{vocab_file}'. To load the vocabulary from a Google pretrained"
                 " model use `tokenizer = BertTokenizer.from_pretrained(PRETRAINED_MODEL_NAME)`"
             )
-        self.vocab = load_vocab(vocab_file)
+        else:
+            with open(vocab_file, 'r', encoding="utf-8") as reader:
+                tokens = reader.readlines()
+        self.vocab = load_vocab(tokens)
         self.ids_to_tokens = collections.OrderedDict([(ids, tok) for tok, ids in self.vocab.items()])
         self.do_basic_tokenize = do_basic_tokenize
         if do_basic_tokenize:
@@ -571,3 +575,4 @@ class WordpieceTokenizer(object):
             else:
                 output_tokens.extend(sub_tokens)
         return output_tokens
+

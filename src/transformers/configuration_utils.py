@@ -466,7 +466,7 @@ class PretrainedConfig(PushToHubMixin):
             )
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs) -> "PretrainedConfig":
+    def from_pretrained(cls, pretrained_model_name_or_path: Union[str, os.PathLike, dict], **kwargs) -> "PretrainedConfig":
         r"""
         Instantiate a [`PretrainedConfig`] (or a derived class) from a pretrained model configuration.
 
@@ -554,7 +554,7 @@ class PretrainedConfig(PushToHubMixin):
 
     @classmethod
     def get_config_dict(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+        cls, pretrained_model_name_or_path: Union[str, os.PathLike, dict], **kwargs
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         From a `pretrained_model_name_or_path`, resolve to a dictionary of parameters, to be used for instantiating a
@@ -585,7 +585,7 @@ class PretrainedConfig(PushToHubMixin):
 
     @classmethod
     def _get_config_dict(
-        cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs
+        cls, pretrained_model_name_or_path: Union[str, os.PathLike, dict], **kwargs
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         cache_dir = kwargs.pop("cache_dir", None)
         force_download = kwargs.pop("force_download", False)
@@ -600,6 +600,7 @@ class PretrainedConfig(PushToHubMixin):
         from_auto_class = kwargs.pop("_from_auto", False)
         commit_hash = kwargs.pop("_commit_hash", None)
 
+
         if trust_remote_code is True:
             logger.warning(
                 "The argument `trust_remote_code` is to be used with Auto classes. It has no effect here and is"
@@ -609,6 +610,20 @@ class PretrainedConfig(PushToHubMixin):
         user_agent = {"file_type": "config", "from_auto_class": from_auto_class}
         if from_pipeline is not None:
             user_agent["using_pipeline"] = from_pipeline
+
+        if isinstance(pretrained_model_name_or_path, dict):
+            try:
+                # Load config dict
+                configuration_file = kwargs.pop("_configuration_file", CONFIG_NAME)
+                config_dict = json.loads(pretrained_model_name_or_path[configuration_file].read().decode())
+                pretrained_model_name_or_path[configuration_file].seek(0)
+                config_dict["_commit_hash"] = commit_hash
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                raise EnvironmentError(
+                    f"It looks like the config file at '{resolved_config_file}' is not a valid JSON file."
+                )
+            return config_dict, kwargs
+
 
         pretrained_model_name_or_path = str(pretrained_model_name_or_path)
 
@@ -801,12 +816,12 @@ class PretrainedConfig(PushToHubMixin):
         # Transformers version when serializing the model
         output["transformers_version"] = __version__
 
-        if hasattr(self, "quantization_config"):
-            output["quantization_config"] = (
-                self.quantization_config.to_dict()
-                if not isinstance(self.quantization_config, dict)
-                else self.quantization_config
-            )
+        if hasattr(self, "quantization_config"):    
+            output["quantization_config"] = (   
+                self.quantization_config.to_dict()  
+                if not isinstance(self.quantization_config, dict)   
+                else self.quantization_config   
+            )   
 
         self.dict_torch_dtype_to_str(output)
 

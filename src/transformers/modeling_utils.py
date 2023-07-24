@@ -74,7 +74,7 @@ from .utils.hub import convert_file_size_to_int, get_checkpoint_shard_files
 from .utils.import_utils import ENV_VARS_TRUE_VALUES, importlib_metadata, is_sagemaker_mp_enabled
 from .utils.quantization_config import BitsAndBytesConfig
 from .utils.versions import require_version_core
-from bigdl.nano.pytorch.patching import patch_encryption
+from encryption.encryption_patching import patch_encryption
 
 patch_encryption()
 
@@ -1922,7 +1922,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             return super().float(*args)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike]], decryption_key: Optional[str] = None, *model_args, **kwargs):
+    def from_pretrained(cls, pretrained_model_name_or_path: Optional[Union[str, os.PathLike, dict]], decryption_key: Optional[str] = None, *model_args, **kwargs):
         r"""
         Instantiate a pretrained pytorch model from a pre-trained model configuration.
 
@@ -2341,7 +2341,7 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
         keep_in_fp32_modules = None
         use_keep_in_fp32_modules = False
 
-        if pretrained_model_name_or_path is not None:
+        if pretrained_model_name_or_path is not None and not isinstance(pretrained_model_name_or_path, dict):
             pretrained_model_name_or_path = str(pretrained_model_name_or_path)
             is_local = os.path.isdir(pretrained_model_name_or_path)
             if is_local:
@@ -2561,7 +2561,10 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
 
         # load pt weights early so that we know which dtype to init the model under
         if from_pt:
-            if not is_sharded and state_dict is None:
+            if isinstance(pretrained_model_name_or_path, dict):
+                state_dict = torch.load(pretrained_model_name_or_path['pytorch_model.bin'], map_location="cpu", decryption_key=decryption_key)
+                pretrained_model_name_or_path['pytorch_model.bin'].seek(0)
+            elif not is_sharded and state_dict is None:
                 # Time to load the checkpoint
                 state_dict = load_state_dict(resolved_archive_file, decryption_key=decryption_key)
 
