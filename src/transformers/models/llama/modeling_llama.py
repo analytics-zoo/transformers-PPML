@@ -280,12 +280,16 @@ class LlamaAttention(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        # past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        # List contains the past_key_value for each of the batch
+        # Each of the tensor in shape (batch_size, num_heads, sequence_length, embed_size_per_head)
+        past_key_value: Optional[List[Tuple[torch.Tensor]]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[List[Tuple[torch.Tensor]]]]:
         bsz, q_len, _ = hidden_states.size()
 
+        # GC: We are not considering this branch
         if self.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.pretraining_tp
             query_slices = self.q_proj.weight.split((self.num_heads * self.head_dim) // self.pretraining_tp, dim=0)
@@ -306,35 +310,133 @@ class LlamaAttention(nn.Module):
             key_states = self.k_proj(hidden_states)
             value_states = self.v_proj(hidden_states)
 
+        # query_states in the format (bsz, num_heads, q_len, head_dim)
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # key_states in the format (bsz, num_kv_heads, q_len, head_dim)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+        # value_states in the format (bsz, num_kv_heads, q_len, head_dim)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        kv_seq_len = key_states.shape[-2]
+        # GC: Do selective batching in a big loop, only consider decoding here
+        # GC: begin-dev of selective batching
         if past_key_value is not None:
+            updated_past_key_values = []
+            # Apply rotary_embeddings
+            max_kv_length = max(kv_pair[0].shape[-2] for kv_pair in past_key_value)
+            max_kv_length += key_states.shape[-2]
+            cos, sin = self.rotary_emb(value_states, seq_len=max_kv_length)
+            # print(position_ids.shape)
+            # print(position_ids)
+            # TODO: decide if positional_ids is correct or not
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+            # End of applying rotary_embedding
+
+            batched_attention_output = []
+            for batch in range(bsz):
+                # 2. concat key_states, value_states
+                # Get current key_states, value_states from previous cache
+                past_k, past_v = past_key_value[batch]
+                # Should be len + 1
+                current_kv_len = past_k.shape[-2] + 1
+                # past_k in the format of [1, num_heads, seq_len, head_dim]
+                # key_states in the format (bsz, num_kv_heads, 1, head_dim)
+                # Select the correct batch in teh first dimension
+                # print("#########################")
+                # print(past_k.shape)
+                # print(key_states[bsz: bsz+1, :, :, :].shape)
+                current_key_states = torch.cat([past_k, key_states[batch: batch + 1, : , :, :]], dim=2)
+                current_value_states = torch.cat([past_v, value_states[batch: batch + 1, :, :, :]], dim=2)
+                # 2. concat key_states, value_states ends
+
+                # print("batch " + str(batch) + "'s key length is :" + str(current_key_states.shape[-2]))
+
+                # 3. Record key_states, and value_states
+                updated_past_key_values.append((current_key_states, current_value_states))
+                # 3. Record key_states, value_states end
+
+                # 4. repeat kv
+                # repeat k/v heads if n_kv_heads < n_heads
+                current_key_states = repeat_kv(current_key_states, self.num_key_value_groups)
+                current_value_states = repeat_kv(current_value_states, self.num_key_value_groups)
+                # 4. repeat kv ends
+
+                # 5. Attention calculation
+                # (1, num_heads, 1, head_dim) x (1, num_kv_heads, head_dim, kv_len)
+                # attn_weights in the format of (bsz, num_heads, 1, kv_len)
+                attn_weights = torch.matmul(query_states[batch: batch + 1, :, :, :], current_key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if attn_weights.size() != (1, self.num_heads, 1, current_kv_len):
+                    raise ValueError(
+                        f"Attention weights should be of size {(1, self.num_heads, 1, current_kv_len)}, but is"
+                        f" {attn_weights.size()}"
+                    )
+                # TODO: decide if we need to apply attention mask 
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                # (1, num_heads, 1, kv_len + 1) x (1, num_heads, kv_len + 1, head_dim)
+                # (1, num_heads, 1, head_dim)
+                attn_output = torch.matmul(attn_weights, current_value_states)
+                if attn_output.size() != (1, self.num_heads, 1, self.head_dim):
+                    raise ValueError(
+                        f"`attn_output` should be of size {(1, self.num_heads, 1, self.head_dim)}, but is"
+                        f" {attn_output.size()}"
+                    )
+                batched_attention_output.append(attn_output)
+                # 5. Attention calculation ends
+            # Concat attention output together
+            # (1, num_heads, 1, head_dim)
+            attn_output = torch.concat(batched_attention_output, dim=0)
+            batched_attention_output.clear()
+            if attn_output.size() != (bsz, self.num_heads, q_len, self.head_dim):
+                raise ValueError(
+                    f"`attn_output` should be of size {(bsz, self.num_heads, q_len, self.head_dim)}, but is"
+                    f" {attn_output.size()}"
+                )
+            attn_output = attn_output.transpose(1, 2).contiguous()
+            attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+            attn_output = self.o_proj(attn_output)
+            # Apply rotary_embedding first in a batch
+
+            # TODO: this output_attentions is not correct, we are not concat attention weight
+            if not output_attentions:
+                attn_weights = None
+            return attn_output, attn_weights, updated_past_key_values if use_cache else None
+        # GC: end-dev of selective-batching
+
+        # Case when past_key_value is None ie. Prefill
+        kv_seq_len = key_states.shape[-2]
+        # Apply embeddings
+        if past_key_value is not None:
+            raise RuntimeError("Should never happened")
             kv_seq_len += past_key_value[0].shape[-2]
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
+        # Concat key/ values
         if past_key_value is not None:
             # reuse k, v, self_attention
             key_states = torch.cat([past_key_value[0], key_states], dim=2)
             value_states = torch.cat([past_key_value[1], value_states], dim=2)
 
-        past_key_value = (key_states, value_states) if use_cache else None
+        # Record past_key_values, for prefill?
+        if use_cache:
+            past_key_value = []
+            for batch in range(bsz):
+                past_key_value.append((key_states[batch: batch + 1, :, :, :], value_states[batch: batch+1, :, :, :]))
+        else:
+            past_key_value = None
 
         # repeat k/v heads if n_kv_heads < n_heads
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
+        # Calculate weight
         attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
         if attn_weights.size() != (bsz, self.num_heads, q_len, kv_seq_len):
             raise ValueError(
                 f"Attention weights should be of size {(bsz, self.num_heads, q_len, kv_seq_len)}, but is"
                 f" {attn_weights.size()}"
             )
 
+        # Apply attention_mask in four dimensions
         if attention_mask is not None:
             if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
                 raise ValueError(
@@ -382,10 +484,10 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        past_key_value: Optional[List[Tuple[torch.Tensor]]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    ) -> Tuple[torch.FloatTensor, Optional[List[Tuple[torch.FloatTensor, torch.FloatTensor]]]]:
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
@@ -629,22 +731,42 @@ class LlamaModel(LlamaPreTrainedModel):
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
+        # The original position_ids in the format of [1, 1]
+        # However, this only applies when kv_len is the same for all the sequences
+        # We should set it to format of [batch, position_id]
+        # TODO: validate correctness
+        device = input_ids.device if input_ids is not None else inputs_embeds.device
+        if past_key_values is None:
+            # For prefill
+            position_ids = torch.arange(0, seq_length, dtype=torch.long, device=device).unsqueeze(0).view(-1, seq_length)
+        else:
+            past_key_values_length = []
+            for sequence_kv in past_key_values[0]:
+                key = sequence_kv[0]
+                past_key_values_length.append(key.shape[-2])
+            position_ids = torch.tensor(past_key_values_length, dtype=torch.long, device=device).unsqueeze(0).view(-1, 1)
+
+        
         if past_key_values is not None:
-            past_key_values_length = past_key_values[0][0].shape[2]
+            # past_key_values in the format of num_layers x num_seqs x 2
+            # TODO: this may be incorrect
+            past_key_values_length = past_key_values[0][0][0].shape[2]
             seq_length_with_past = seq_length_with_past + past_key_values_length
 
-        if position_ids is None:
-            device = input_ids.device if input_ids is not None else inputs_embeds.device
-            position_ids = torch.arange(
-                past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
-            )
-            position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
-        else:
-            position_ids = position_ids.view(-1, seq_length).long()
+        # if position_ids is None:
+        #     device = input_ids.device if input_ids is not None else inputs_embeds.device
+        #     # [start, end)
+        #     position_ids = torch.arange(
+        #         past_key_values_length, seq_length + past_key_values_length, dtype=torch.long, device=device
+        #     )
+        #     position_ids = position_ids.unsqueeze(0).view(-1, seq_length)
+        # else:
+        #     position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         # embed positions
+        # TODO: only generate attention_mask for prefilling
         if attention_mask is None:
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
@@ -692,6 +814,7 @@ class LlamaModel(LlamaPreTrainedModel):
             else:
                 layer_outputs = decoder_layer(
                     hidden_states,
+                    # TODO: decide if we need this attention_mask, we are not using the attention mask when decoding
                     attention_mask=attention_mask,
                     position_ids=position_ids,
                     past_key_value=past_key_value,
@@ -733,6 +856,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         self.pretraining_tp = config.pretraining_tp
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        print("transformers: Use self modified llama model")
 
         # Initialize weights and apply final processing
         self.post_init()
